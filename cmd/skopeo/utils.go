@@ -2,13 +2,15 @@ package main
 
 import (
 	"context"
-	"errors"
 	"io"
 	"strings"
 
 	"github.com/containers/image/pkg/compression"
 	"github.com/containers/image/transports/alltransports"
 	"github.com/containers/image/types"
+	"github.com/containers/ocicrypt"
+	encconfig "github.com/containers/ocicrypt/config"
+	"github.com/pkg/errors"
 	"github.com/urfave/cli"
 )
 
@@ -61,6 +63,8 @@ type imageOptions struct {
 	sharedBlobDir    string              // A directory to use for OCI blobs, shared across repositories
 	dockerDaemonHost string              // docker-daemon: host to connect to
 	noCreds          bool                // Access the registry anonymously
+	keyFiles         string              // Files that holds the key to either encrypt or decrypt an image
+	recipients       string              // Files that holds the key to either encrypt or decrypt an image
 }
 
 // imageFlags prepares a collection of CLI flags writing into imageOptions, and the managed imageOptions structure.
@@ -108,6 +112,16 @@ func imageFlags(global *globalOptions, shared *sharedImageOptions, flagPrefix, c
 			Usage:       "Access the registry anonymously",
 			Destination: &opts.noCreds,
 		},
+		cli.StringFlag{
+			Name:        flagPrefix + "key",
+			Usage:       "Keys for decryption of encrypted images",
+			Destination: &opts.keyFiles,
+		},
+		cli.StringFlag{
+			Name:        flagPrefix + "recipient",
+			Usage:       "Recipient for encryption of images",
+			Destination: &opts.recipients,
+		},
 	}, &opts
 }
 
@@ -145,6 +159,69 @@ func (opts *imageOptions) newSystemContext() (*types.SystemContext, error) {
 			return nil, err
 		}
 	}
+
+	var decryptCc *encconfig.CryptoConfig
+	var ccs []encconfig.CryptoConfig
+
+	if opts.keyFiles != "" {
+		keyFiles := strings.Split(opts.keyFiles, ",")
+		// TODO: Add dec-recipients
+		dcc, err := createDecryptCryptoConfig(keyFiles, []string{})
+		if err != nil {
+			return nil, err
+		}
+		decryptCc = &dcc
+		ccs = append(ccs, dcc)
+	}
+
+	if opts.recipients != "" {
+		keyFiles := strings.Split(opts.recipients, ",")
+		gpgRecipients, pubKeys, x509s, err := processRecipientKeys(keyFiles)
+		if err != nil {
+			return nil, err
+		}
+		encryptCcs := []encconfig.CryptoConfig{}
+
+		// Create GPG client with guessed GPG version and default homedir
+		gpgClient, err := ocicrypt.NewGPGClient("", "")
+		gpgInstalled := err == nil
+		if len(gpgRecipients) > 0 && gpgInstalled {
+			gpgPubRingFile, err := gpgClient.ReadGPGPubRingFile()
+			if err != nil {
+				return nil, err
+			}
+
+			gpgCc, err := encconfig.EncryptWithGpg(gpgRecipients, gpgPubRingFile)
+			if err != nil {
+				return nil, err
+			}
+			encryptCcs = append(encryptCcs, gpgCc)
+		}
+
+		// Create Encryption Crypto Config
+		pkcs7Cc, err := encconfig.EncryptWithPkcs7(x509s)
+		if err != nil {
+			return nil, err
+		}
+		encryptCcs = append(encryptCcs, pkcs7Cc)
+
+		jweCc, err := encconfig.EncryptWithJwe(pubKeys)
+		if err != nil {
+			return nil, err
+		}
+		encryptCcs = append(encryptCcs, jweCc)
+		ecc := encconfig.CombineCryptoConfigs(encryptCcs)
+		if decryptCc != nil {
+			ecc.EncryptConfig.AttachDecryptConfig(decryptCc.DecryptConfig)
+		}
+		ccs = append(ccs, ecc)
+	}
+
+	if len(ccs) > 0 {
+		cc := encconfig.CombineCryptoConfigs(ccs)
+		ctx.CryptoConfig = &cc
+	}
+
 	if opts.noCreds {
 		ctx.DockerAuthConfig = &types.DockerAuthConfig{}
 	}
