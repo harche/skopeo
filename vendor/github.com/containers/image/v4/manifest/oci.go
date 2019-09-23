@@ -3,9 +3,11 @@ package manifest
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/containers/image/v4/pkg/compression"
 	"github.com/containers/image/v4/types"
+	ociencspec "github.com/containers/ocicrypt/spec"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -33,7 +35,7 @@ type OCI1 struct {
 // SupportedOCI1MediaType checks if the specified string is a supported OCI1 media type.
 func SupportedOCI1MediaType(m string) error {
 	switch m {
-	case imgspecv1.MediaTypeDescriptor, imgspecv1.MediaTypeImageConfig, imgspecv1.MediaTypeImageLayer, imgspecv1.MediaTypeImageLayerGzip, imgspecv1.MediaTypeImageLayerNonDistributable, imgspecv1.MediaTypeImageLayerNonDistributableGzip, imgspecv1.MediaTypeImageLayerNonDistributableZstd, imgspecv1.MediaTypeImageLayerZstd, imgspecv1.MediaTypeImageManifest, imgspecv1.MediaTypeLayoutHeader:
+	case imgspecv1.MediaTypeDescriptor, imgspecv1.MediaTypeImageConfig, imgspecv1.MediaTypeImageLayer, imgspecv1.MediaTypeImageLayerGzip, imgspecv1.MediaTypeImageLayerNonDistributable, imgspecv1.MediaTypeImageLayerNonDistributableGzip, imgspecv1.MediaTypeImageLayerNonDistributableZstd, imgspecv1.MediaTypeImageLayerZstd, imgspecv1.MediaTypeImageManifest, imgspecv1.MediaTypeLayoutHeader, ociencspec.MediaTypeLayerEnc, ociencspec.MediaTypeLayerGzipEnc:
 		return nil
 	default:
 		return fmt.Errorf("unsupported OCIv1 media type: %q", m)
@@ -117,7 +119,7 @@ func isOCI1Layer(mimeType string) bool {
 	}
 }
 
-// UpdateLayerInfos replaces the original layers with the specified BlobInfos (size+digest+urls), in order (the root layer first, and then successive layered layers)
+// UpdateLayerInfos replaces the original layers with the specified BlobInfos (size+digest+urls+mediatype), in order (the root layer first, and then successive layered layers)
 func (m *OCI1) UpdateLayerInfos(layerInfos []types.BlobInfo) error {
 	if len(m.Layers) != len(layerInfos) {
 		return errors.Errorf("Error preparing updated manifest: layer count changed from %d to %d", len(m.Layers), len(layerInfos))
@@ -195,6 +197,15 @@ func (m *OCI1) UpdateLayerInfos(layerInfos []types.BlobInfo) error {
 		default:
 			return fmt.Errorf("Error preparing updated manifest: unknown compression operation (%d) for layer %q", info.CompressionOperation, info.Digest)
 		}
+
+		if info.CryptoOperation == types.Encrypt {
+			encMediaType, err := GetEncryptedMediaType(m.Layers[i].MediaType)
+			if err != nil {
+				return fmt.Errorf("error preparing updated manifest: encryption specified but no counterpart for mediatype: %q", m.Layers[i].MediaType)
+			}
+			m.Layers[i].MediaType = encMediaType
+		}
+
 		m.Layers[i].Digest = info.Digest
 		m.Layers[i].Size = info.Size
 		m.Layers[i].Annotations = info.Annotations
@@ -240,4 +251,38 @@ func (m *OCI1) ImageID([]digest.Digest) (string, error) {
 		return "", err
 	}
 	return m.Config.Digest.Hex(), nil
+}
+
+// IsEncryptedLayer indicates whether the blob is is encrypted
+func IsEncryptedLayer(b types.BlobInfo) bool {
+	// Check if encrypted mediatype
+	return b.MediaType == ociencspec.MediaTypeLayerGzipEnc ||
+		b.MediaType == ociencspec.MediaTypeLayerEnc
+}
+
+// GetEncryptedMediaType will return the mediatype to its encrypted counterpart and return
+// an error if the mediatype does not support encryption
+func GetEncryptedMediaType(mediatype string) (string, error) {
+	for _, s := range strings.Split(mediatype, "+")[1:] {
+		if s == "encrypted" {
+			return "", errors.Errorf("unsupportedmediatype: %v already encrypted", mediatype)
+		}
+	}
+	unsuffixedMediatype := strings.Split(mediatype, "+")[0]
+	switch unsuffixedMediatype {
+	case DockerV2Schema2LayerMediaType, imgspecv1.MediaTypeImageLayer, imgspecv1.MediaTypeImageLayerNonDistributable:
+		return mediatype + "+encrypted", nil
+	}
+
+	return "", errors.Errorf("unsupported mediatype to encrypt: %v", mediatype)
+}
+
+// GetDecryptedMediaType will return the mediatype to its decrypted counterpart and return
+// an error if the mediatype does not support encryption
+func GetDecryptedMediaType(mediatype string) (string, error) {
+	strimmed := strings.TrimSuffix(mediatype, "+encrypted")
+	if strimmed == mediatype {
+		return "", errors.Errorf("unsupported mediatype to decrypt: %v", mediatype)
+	}
+	return strimmed, nil
 }

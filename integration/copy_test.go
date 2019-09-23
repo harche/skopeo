@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -158,6 +161,109 @@ func (s *CopySuite) TestCopySimple(c *check.C) {
 	_, err = os.Stat(ociDest)
 	c.Assert(err, check.IsNil)
 
+}
+
+func (s *CopySuite) TestCopyEncryption(c *check.C) {
+
+	dir1, err := ioutil.TempDir("", "copy-1")
+	c.Assert(err, check.IsNil)
+	defer os.RemoveAll(dir1)
+	dir2, err := ioutil.TempDir("", "copy-2")
+	c.Assert(err, check.IsNil)
+	defer os.RemoveAll(dir2)
+	dir3, err := ioutil.TempDir("", "copy-3")
+	c.Assert(err, check.IsNil)
+	defer os.RemoveAll(dir3)
+	dir4, err := ioutil.TempDir("", "copy-4")
+	c.Assert(err, check.IsNil)
+	defer os.RemoveAll(dir4)
+	dir5, err := ioutil.TempDir("", "copy-5")
+	c.Assert(err, check.IsNil)
+	defer os.RemoveAll(dir5)
+
+	// Create RSA key pair
+	privateKey, _ := rsa.GenerateKey(rand.Reader, 4096)
+	publicKey := &privateKey.PublicKey
+	privateKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
+	publicKeyBytes, _ := x509.MarshalPKIXPublicKey(publicKey)
+	ioutil.WriteFile(dir4+"/private.key", privateKeyBytes, 0644)
+	ioutil.WriteFile(dir4+"/public.key", publicKeyBytes, 0644)
+
+	// We can either perform encryption or decryption on the image.
+	// This is why use should not be able to specify both encryption and decryption
+	// during copy at the same time.
+	assertSkopeoFails(c, ".*--encryption-key and --decryption-key cannot be specified together.*",
+		"copy", "--encryption-key", "jwe:"+dir4+"/public.key", "--decryption-key", dir4+"/private.key",
+		"oci:"+dir2+":encrypted", "oci:"+dir3+":decrypted")
+	assertSkopeoFails(c, ".*--encryption-key and --decryption-key cannot be specified together.*",
+		"copy", "--decryption-key", dir4+"/private.key", "--encryption-key", "jwe:"+dir4+"/public.key",
+		"oci:"+dir2+":encrypted", "oci:"+dir3+":decrypted")
+
+	// Copy a standard busybox image locally
+	assertSkopeoSucceeds(c, "", "copy", "docker://busybox", "oci:"+dir1+":latest")
+
+	// Encrypt the image
+	assertSkopeoSucceeds(c, "", "copy", "--encryption-key",
+		"jwe:"+dir4+"/public.key", "oci:"+dir1+":latest", "oci:"+dir2+":encrypted")
+
+	// An attempt to decrypt an encrypted image without a valid private key should fail
+	assertSkopeoFails(c, ".*Necessary DecryptParameters not present.*",
+		"copy", "oci:"+dir2+":encrypted", "oci:"+dir3+":decrypted")
+
+	// Decrypt the image
+	assertSkopeoSucceeds(c, "", "copy", "--decryption-key", dir4+"/private.key",
+		"oci:"+dir2+":encrypted", "oci:"+dir3+":decrypted")
+
+	// Check image authorization
+	files, err := ioutil.ReadDir(dir3 + "/blobs/sha256")
+	c.Assert(err, check.IsNil)
+	blobFound := false
+	for _, f := range files {
+		fileContent, err := os.Open(dir3 + "/blobs/sha256/" + f.Name())
+		c.Assert(err, check.IsNil)
+		contentType, err := getFileContentType(fileContent)
+		c.Assert(err, check.IsNil)
+
+		if contentType == "application/x-gzip" {
+			blobFound = true
+			break
+		}
+	}
+	c.Assert(blobFound, check.Equals, true)
+
+	assertSkopeoSucceeds(c, "", "copy", "--check-authorization-only", "--decryption-key", dir4+"/private.key",
+		"oci:"+dir2+":encrypted", "oci:"+dir5+":decrypted")
+
+	files, err = ioutil.ReadDir(dir5 + "/blobs/sha256")
+	c.Assert(err, check.IsNil)
+	blobFound = false
+	for _, f := range files {
+		fileContent, err := os.Open(dir5 + "/blobs/sha256/" + f.Name())
+		c.Assert(err, check.IsNil)
+		contentType, err := getFileContentType(fileContent)
+		c.Assert(err, check.IsNil)
+
+		if contentType == "application/x-gzip" {
+			blobFound = true
+			break
+		}
+	}
+
+	c.Assert(blobFound, check.Equals, false)
+
+}
+
+func getFileContentType(out *os.File) (string, error) {
+
+	buffer := make([]byte, 512)
+
+	_, err := out.Read(buffer)
+	if err != nil {
+		return "", err
+	}
+	contentType := http.DetectContentType(buffer)
+
+	return contentType, nil
 }
 
 // Check whether dir: images in dir1 and dir2 are equal, ignoring schema1 signatures.
