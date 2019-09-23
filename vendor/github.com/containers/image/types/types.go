@@ -7,8 +7,9 @@ import (
 
 	"github.com/containers/image/docker/reference"
 	"github.com/containers/image/pkg/compression"
+	encconfig "github.com/containers/ocicrypt/config"
 	"github.com/opencontainers/go-digest"
-	"github.com/opencontainers/image-spec/specs-go/v1"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // ImageTransport is a top-level namespace for ways to to store/load an image.
@@ -91,6 +92,31 @@ type ImageReference interface {
 	DeleteImage(ctx context.Context, sys *SystemContext) error
 }
 
+// LayerCompression indicates if layers must be compressed, decompressed or preserved
+type LayerCompression int
+
+const (
+	// PreserveOriginal indicates the layer must be preserved, ie
+	// no compression or decompression.
+	PreserveOriginal LayerCompression = iota
+	// Decompress indicates the layer must be decompressed
+	Decompress
+	// Compress indicates the layer must be compressed
+	Compress
+)
+
+// LayerCrypto indicates if layers have been encrypted or decrypted or none
+type LayerCrypto int
+
+const (
+	// None indicates the layer must be preserved, no encryption/decryption
+	None LayerCrypto = iota
+	// Encrypt indicates the layer is encrypted
+	Encrypt
+	// Decrypt indicates the layer is decrypted
+	Decrypt
+)
+
 // BlobInfo collects known information about a blob (layer/config).
 // In some situations, some fields may be unknown, in others they may be mandatory; documenting an “unknown” value here does not override that.
 type BlobInfo struct {
@@ -99,6 +125,17 @@ type BlobInfo struct {
 	URLs        []string
 	Annotations map[string]string
 	MediaType   string
+	// CompressionOperation is used in Image.UpdateLayerInfos to instruct
+	// whether the original layer should be preserved or (de)compressed. The
+	// field defaults to preserve the original layer.
+	CompressionOperation LayerCompression
+	// CompressionAlgorithm is used in Image.UpdateLayerInfos to set the correct
+	// MIME type for compressed layers (e.g., gzip or zstd). This field MUST be
+	// set when `CompressionOperation == Compress`.
+	CompressionAlgorithm *compression.Algorithm
+	// CryptoOperation is used in Image.UpdateLayerInfos to instruct
+	// whether the original layer was encrypted/decrypted
+	CryptoOperation LayerCrypto
 }
 
 // BICTransportScope encapsulates transport-dependent representation of a “scope” where blobs are or are not present.
@@ -211,19 +248,6 @@ type ImageSource interface {
 	// WARNING: The list may contain duplicates, and they are semantically relevant.
 	LayerInfosForCopy(ctx context.Context) ([]BlobInfo, error)
 }
-
-// LayerCompression indicates if layers must be compressed, decompressed or preserved
-type LayerCompression int
-
-const (
-	// PreserveOriginal indicates the layer must be preserved, ie
-	// no compression or decompression.
-	PreserveOriginal LayerCompression = iota
-	// Decompress indicates the layer must be decompressed
-	Decompress
-	// Compress indicates the layer must be compressed
-	Compress
-)
 
 // ImageDestination is a service, possibly remote (= slow), to store components of a single image.
 //
@@ -357,6 +381,8 @@ type Image interface {
 	// Everything in options.InformationOnly should be provided, other fields should be set only if a modification is desired.
 	// This does not change the state of the original Image object.
 	UpdatedImage(ctx context.Context, options ManifestUpdateOptions) (Image, error)
+	// SupportsEncryption returns an indicator that the image supports encryption
+	SupportsEncryption(ctx context.Context) bool
 	// Size returns an approximation of the amount of disk space which is consumed by the image in its current
 	// location.  If the size is not known, -1 will be returned.
 	Size() (int64, error)
@@ -490,6 +516,8 @@ type SystemContext struct {
 	DockerInsecureSkipTLSVerify OptionalBool
 	// if nil, the library tries to parse ~/.docker/config.json to retrieve credentials
 	DockerAuthConfig *DockerAuthConfig
+	// if not nil, CryptoConfig will be used to encrypt/decrypt images
+	CryptoConfig *encconfig.CryptoConfig
 	// if not "", an User-Agent header is added to each request when contacting a registry.
 	DockerRegistryUserAgent string
 	// if true, a V1 ping attempt isn't done to give users a better error. Default is false.

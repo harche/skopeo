@@ -2,13 +2,15 @@ package main
 
 import (
 	"context"
-	"errors"
 	"io"
 	"strings"
 
 	"github.com/containers/image/pkg/compression"
 	"github.com/containers/image/transports/alltransports"
 	"github.com/containers/image/types"
+	encconfig "github.com/containers/ocicrypt/config"
+	enchelpers "github.com/containers/ocicrypt/helpers"
+	"github.com/pkg/errors"
 	"github.com/urfave/cli"
 )
 
@@ -61,6 +63,8 @@ type imageOptions struct {
 	sharedBlobDir    string              // A directory to use for OCI blobs, shared across repositories
 	dockerDaemonHost string              // docker-daemon: host to connect to
 	noCreds          bool                // Access the registry anonymously
+	keyFiles         string              // Files that holds the key to either encrypt or decrypt an image
+	recipients       string              // Files that holds the key to either encrypt or decrypt an image
 }
 
 // imageFlags prepares a collection of CLI flags writing into imageOptions, and the managed imageOptions structure.
@@ -108,6 +112,16 @@ func imageFlags(global *globalOptions, shared *sharedImageOptions, flagPrefix, c
 			Usage:       "Access the registry anonymously",
 			Destination: &opts.noCreds,
 		},
+		cli.StringFlag{
+			Name:        flagPrefix + "key",
+			Usage:       "Keys for decryption of encrypted images",
+			Destination: &opts.keyFiles,
+		},
+		cli.StringFlag{
+			Name:        flagPrefix + "recipient",
+			Usage:       "Recipient for encryption of images",
+			Destination: &opts.recipients,
+		},
 	}, &opts
 }
 
@@ -145,6 +159,34 @@ func (opts *imageOptions) newSystemContext() (*types.SystemContext, error) {
 			return nil, err
 		}
 	}
+
+	var ccs []encconfig.CryptoConfig
+
+	if opts.recipients != "" {
+		// encryption
+		recipients := strings.Split(opts.recipients, ",")
+		ecc, err := enchelpers.CreateCryptoConfig(recipients, []string{})
+		if err != nil {
+			return nil, err
+		}
+		ccs = append(ccs, ecc)
+	}
+
+	if opts.keyFiles != "" {
+		// decryption
+		keyFiles := strings.Split(opts.keyFiles, ",")
+		dcc, err := enchelpers.CreateDecryptCryptoConfig(keyFiles, []string{})
+		if err != nil {
+			return nil, err
+		}
+		ccs = append(ccs, dcc)
+	}
+
+	if len(ccs) > 0 {
+		cc := encconfig.CombineCryptoConfigs(ccs)
+		ctx.CryptoConfig = &cc
+	}
+
 	if opts.noCreds {
 		ctx.DockerAuthConfig = &types.DockerAuthConfig{}
 	}
