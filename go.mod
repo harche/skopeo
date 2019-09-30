@@ -5,8 +5,8 @@ go 1.12
 require (
 	github.com/containers/buildah v1.8.4
 	github.com/containers/image v1.5.2-0.20190821161828-0cc0e97405db
-	github.com/containers/ocicrypt v0.0.0-20190927013713-31cd2a2965df
-	github.com/containers/storage v1.13.2
+	github.com/containers/ocicrypt v0.0.0-20190930154801-b87a4a69c741
+	github.com/containers/storage v1.13.4
 	github.com/docker/docker v0.0.0-20180522102801-da99009bbb11
 	github.com/dsnet/compress v0.0.1 // indirect
 	github.com/go-check/check v0.0.0-20180628173108-788fd7840127
@@ -24,4 +24,4 @@ require (
 	k8s.io/client-go v0.0.0-20181219152756-3dd551c0f083 // indirect
 )
 
-replace github.com/containers/image => github.com/lumjjb/image v1.5.2-0.20190927135326-bfc851c7463b
+replace github.com/containers/image => github.com/lumjjb/image v1.5.2-0.20190930180713-5be6fcabd64e
